@@ -1,25 +1,13 @@
 import React, { useRef, useEffect, useCallback } from 'react';
 import { 
-  GameState, 
-  Player, 
-  Vine, 
-  Particle,
-  Boss,
-  Spider,
-  PillarState
+  GameState, Player, Vine, Particle, Boss, Spider, 
+  PillarState, Item, BossSegment 
 } from '../types';
 import { 
-  COLORS, 
-  PILLARS, 
-  PLAYER_RADIUS, 
-  PLAYER_SPEED,
-  INITIAL_WEAPON_LENGTH, 
-  VINE_BASE_SPEED, 
-  ATTACK_DURATION,
-  ATTACK_COOLDOWN,
-  BOSS_A_HP,
-  SPIDER_HP,
-  LONG_BOSS_SEGMENTS
+  COLORS, PILLARS, PLAYER_RADIUS, PLAYER_SPEED, PLAYER_MAX_HEALTH,
+  INITIAL_WEAPON_LENGTH, VINE_BASE_SPEED, ATTACK_DURATION, ATTACK_COOLDOWN,
+  BOSS_A_HP, SNAIL_HP, SPIDER_HP, LONG_BOSS_SEGMENTS,
+  TELEPORT_COOLDOWN, LASER_COOLDOWN, LASER_DURATION, ITEM_SPAWN_RATE
 } from '../constants';
 
 interface GameCanvasProps {
@@ -33,753 +21,365 @@ interface GameCanvasProps {
 }
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({
-  gameState,
-  setGameState,
-  level,
-  setLevel,
-  score,
-  setScore,
-  triggerGameOver
+  gameState, setGameState, level, setLevel, score, setScore, triggerGameOver
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  
-  // --- REFS ---
   const playerRef = useRef<Player>({
-    id: 'hero',
-    x: 0,
-    y: 0,
-    radius: PLAYER_RADIUS,
-    angle: 0,
-    weaponLength: INITIAL_WEAPON_LENGTH,
-    weaponLevel: 1,
-    isAttacking: false,
-    attackCooldown: 0,
-    health: 1
+    id: 'hero', x: 0, y: 0, radius: PLAYER_RADIUS, angle: 0,
+    weaponLength: INITIAL_WEAPON_LENGTH, baseWeaponLength: INITIAL_WEAPON_LENGTH,
+    weaponLevel: 1, isAttacking: false, attackCooldown: 0,
+    health: PLAYER_MAX_HEALTH, maxHealth: PLAYER_MAX_HEALTH,
+    teleportCooldown: 0, isTeleporting: false, laserCooldown: 0, isFiringLaser: false,
+    longStickTimer: 0
   });
   
   const vinesRef = useRef<Vine[]>([]);
-  const bossRef = useRef<Boss | null>(null);
+  const bossesRef = useRef<Boss[]>([]);
   const spidersRef = useRef<Spider[]>([]);
   const particlesRef = useRef<Particle[]>([]);
+  const itemsRef = useRef<Item[]>([]);
   
   const frameCountRef = useRef(0);
   const animationFrameId = useRef<number>(0);
   const mousePos = useRef({ x: 0, y: 0 });
   const keysPressed = useRef<{ [key: string]: boolean }>({});
 
-  // Cinematic State
   const cinematicRef = useRef({
-    step: 0, // 0: start, 1: pillar 1 fall, 2: others fall, 3: house collapse, 4: vines, 5: end
-    timer: 0,
-    shake: 0,
-    pillarStates: PILLARS.map(p => ({ ...p, rotation: 0, fallen: false, opacity: 1 })) as PillarState[]
+    step: 0, timer: 0, shake: 0,
+    pillarStates: PILLARS.map(p => ({ ...p, width: 40, height: 120, rotation: 0, fallen: false, opacity: 1 })) as PillarState[]
   });
 
-  // --- INITIALIZATION ---
   useEffect(() => {
     const handleResize = () => {
       if (canvasRef.current) {
         canvasRef.current.width = window.innerWidth;
         canvasRef.current.height = window.innerHeight;
-        if (gameState === GameState.INTRO || gameState === GameState.CINEMATIC) {
-          playerRef.current.x = window.innerWidth / 2;
-          playerRef.current.y = window.innerHeight / 2;
-        }
       }
     };
     window.addEventListener('resize', handleResize);
     handleResize();
     return () => window.removeEventListener('resize', handleResize);
-  }, [gameState]);
+  }, []);
 
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => { keysPressed.current[e.key] = true; };
-    const onKeyUp = (e: KeyboardEvent) => { keysPressed.current[e.key] = false; };
+    const onKeyDown = (e: KeyboardEvent) => { 
+      keysPressed.current[e.key.toLowerCase()] = true;
+      if (gameState === GameState.PLAYING) {
+        if (e.key.toLowerCase() === 'q' && playerRef.current.teleportCooldown <= 0) {
+          if (playerRef.current.isTeleporting) {
+            playerRef.current.x = mousePos.current.x;
+            playerRef.current.y = mousePos.current.y;
+            playerRef.current.isTeleporting = false;
+            playerRef.current.teleportCooldown = TELEPORT_COOLDOWN;
+            spawnParticles(playerRef.current.x, playerRef.current.y, COLORS.laser, 10);
+          } else {
+            playerRef.current.isTeleporting = true;
+          }
+        }
+        if (e.key.toLowerCase() === 'e' && playerRef.current.laserCooldown <= 0) fireLaser();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => keysPressed.current[e.key.toLowerCase()] = false;
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, []);
-
-  // Reset Logic
-  useEffect(() => {
-    if (gameState === GameState.CINEMATIC) {
-      // Reset cinematic
-      cinematicRef.current = {
-        step: 0,
-        timer: 0,
-        shake: 0,
-        pillarStates: PILLARS.map(p => ({ ...p, rotation: 0, fallen: false, opacity: 1 }))
-      };
-    }
-    
-    if (gameState === GameState.INTRO || (gameState === GameState.PLAYING && score === 0 && level === 1)) {
-      vinesRef.current = [];
-      bossRef.current = null;
-      spidersRef.current = [];
-      particlesRef.current = [];
-      playerRef.current.isAttacking = false;
-      playerRef.current.attackCooldown = 0;
-      playerRef.current.health = 1;
-      playerRef.current.weaponLevel = 1;
-      if (canvasRef.current) {
-        playerRef.current.x = canvasRef.current.width / 2;
-        playerRef.current.y = canvasRef.current.height / 2;
-      }
-    }
-  }, [gameState, score, level]);
-
-  const handleInput = useCallback((x: number, y: number) => {
-    if (gameState !== GameState.PLAYING) return;
-    mousePos.current = { x, y };
-    const dx = x - playerRef.current.x;
-    const dy = y - playerRef.current.y;
-    playerRef.current.angle = Math.atan2(dy, dx);
-
-    if (playerRef.current.attackCooldown <= 0) {
-      playerRef.current.isAttacking = true;
-      playerRef.current.attackCooldown = ATTACK_DURATION + ATTACK_COOLDOWN;
-    }
   }, [gameState]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const onMouseMove = (e: MouseEvent) => {
-        const dx = e.clientX - playerRef.current.x;
-        const dy = e.clientY - playerRef.current.y;
-        playerRef.current.angle = Math.atan2(dy, dx);
-    };
-    const onMouseDown = (e: MouseEvent) => handleInput(e.clientX, e.clientY);
-    const onTouchStart = (e: TouchEvent) => {
-      e.preventDefault();
-      handleInput(e.touches[0].clientX, e.touches[0].clientY);
-    };
-    canvas.addEventListener('mousemove', onMouseMove);
-    canvas.addEventListener('mousedown', onMouseDown);
-    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
-    return () => {
-      canvas.removeEventListener('mousemove', onMouseMove);
-      canvas.removeEventListener('mousedown', onMouseDown);
-      canvas.removeEventListener('touchstart', onTouchStart);
-    };
-  }, [handleInput]);
-
-  // --- HELPER FUNCTIONS ---
 
   const spawnParticles = (x: number, y: number, color: string, count: number = 5) => {
     for (let p = 0; p < count; p++) {
       particlesRef.current.push({
-        id: Math.random().toString(),
-        x: x,
-        y: y,
-        radius: Math.random() * 3 + 2,
-        vx: (Math.random() - 0.5) * 8,
-        vy: (Math.random() - 0.5) * 8,
-        life: 30,
-        color: color
+        id: Math.random().toString(), x, y, radius: Math.random() * 3 + 2,
+        vx: (Math.random() - 0.5) * 8, vy: (Math.random() - 0.5) * 8, life: 30, color
       });
     }
-  };
-
-  const spawnLongBoss = (width: number, height: number) => {
-    const segments = [];
-    // Start off screen
-    const startX = -100;
-    const startY = height / 2;
-    
-    // Create segments
-    for(let i=0; i<LONG_BOSS_SEGMENTS; i++) {
-      segments.push({
-        x: startX - (i * 20),
-        y: startY,
-        radius: 15,
-        isWeakPoint: i % 4 === 0, // Every 4th segment is a weak point
-        destroyed: false
-      });
-    }
-
-    bossRef.current = {
-      id: 'long-boss',
-      type: 'LONG_VINE',
-      x: startX,
-      y: startY,
-      radius: 20,
-      angle: 0,
-      speed: 2,
-      health: 5, // 5 weak points need to be hit
-      maxHealth: 5,
-      segments: segments,
-      active: true
-    };
-  };
-
-  const spawnBossA = (width: number, height: number) => {
-     // Spawns from top
-     bossRef.current = {
-       id: 'boss-a',
-       type: 'BOSS_A',
-       x: width / 2,
-       y: -100,
-       radius: 40,
-       angle: Math.PI / 2,
-       speed: 1.5,
-       health: BOSS_A_HP,
-       maxHealth: BOSS_A_HP,
-       segments: [],
-       active: true
-     };
   };
 
   const spawnSpiders = () => {
-    PILLARS.forEach((pillar) => {
-       spidersRef.current.push({
-         id: `spider-${Math.random()}`,
-         x: pillar.x,
-         y: pillar.y,
-         radius: 12,
-         speed: 3.5,
-         health: SPIDER_HP,
-         targetId: 'hero'
-       });
+    PILLARS.forEach(p => {
+      spidersRef.current.push({
+        id: Math.random().toString(), x: p.x, y: p.y,
+        radius: 12, health: SPIDER_HP, speed: 3
+      });
     });
   };
 
-  // --- GAME LOOP ---
-  useEffect(() => {
-    const loop = () => {
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext('2d');
-      if (!canvas || !ctx) return;
+  const fireLaser = () => {
+    const p = playerRef.current;
+    p.isFiringLaser = true;
+    p.laserCooldown = LASER_COOLDOWN;
+    const beamAngle = p.angle;
+    const beamLength = 1500;
 
-      const width = canvas.width;
-      const height = canvas.height;
+    const checkHit = (cx: number, cy: number, r: number) => {
+      const dx = cx - p.x;
+      const dy = cy - p.y;
+      const dist = Math.hypot(dx, dy);
+      const angleTo = Math.atan2(dy, dx);
+      let diff = angleTo - beamAngle;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      return dist < beamLength && Math.abs(diff) < 0.1;
+    };
 
-      // ----------------------
-      // CINEMATIC MODE LOGIC
-      // ----------------------
-      if (gameState === GameState.CINEMATIC) {
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, width, height);
-
-        const c = cinematicRef.current;
-        c.timer++;
-
-        // Sequence Logic
-        if (c.step === 0 && c.timer > 60) { c.step = 1; c.timer = 0; } // Start Pillar 1
-        if (c.step === 1) {
-           c.shake = 2;
-           // Rotate Pillar 1 (Index 0)
-           c.pillarStates[0].rotation += 0.05;
-           if (c.pillarStates[0].rotation > Math.PI / 2.5) {
-             c.step = 2; c.timer = 0; c.shake = 5; // Trigger others
-           }
-        }
-        if (c.step === 2) {
-           // Rotate others
-           c.pillarStates[1].rotation -= 0.05;
-           c.pillarStates[2].rotation += 0.05;
-           if (c.timer > 100) { c.step = 3; c.timer = 0; }
-        }
-        if (c.step === 3) {
-           c.shake = 10; // Big shake
-           c.pillarStates.forEach(p => p.opacity -= 0.01);
-           if (c.timer > 120) { c.step = 4; c.timer = 0; }
-        }
-        if (c.step === 4) {
-           // Vines appear animation (simple text or visual)
-           c.shake = 0;
-           if (c.timer > 100) {
-             setGameState(GameState.INTRO);
-             return;
-           }
-        }
-
-        // Draw Cinematic
-        ctx.save();
-        if (c.shake > 0) {
-          ctx.translate((Math.random() - 0.5) * c.shake, (Math.random() - 0.5) * c.shake);
-        }
-
-        // Draw Pillars
-        c.pillarStates.forEach(p => {
-          ctx.save();
-          ctx.translate(p.x, p.y);
-          ctx.rotate(p.rotation);
-          ctx.fillStyle = COLORS.pillar;
-          ctx.globalAlpha = Math.max(0, p.opacity);
-          ctx.fillRect(-30, -100, 60, 200); // Taller pillars for intro
-          
-          // Cracks
-          if (c.step >= 1) {
-            ctx.strokeStyle = '#000';
-            ctx.lineWidth = 3;
-            ctx.beginPath();
-            ctx.moveTo(-20, -50);
-            ctx.lineTo(20, 0);
-            ctx.lineTo(-10, 50);
-            ctx.stroke();
-          }
-          ctx.restore();
-        });
-
-        // Text
-        ctx.fillStyle = '#fff';
-        ctx.font = '30px Cinzel';
-        ctx.textAlign = 'center';
-        if (c.step === 1) ctx.fillText("The First Pillar Cracks...", width/2, height - 100);
-        if (c.step === 2) ctx.fillText("The Foundation Fails...", width/2, height - 100);
-        if (c.step === 3) ctx.fillText("Darkness Consumes The Ruins...", width/2, height - 100);
-        if (c.step === 4) {
-          ctx.fillStyle = COLORS.vine;
-          ctx.fillText("THEY ARE HERE", width/2, height/2);
-        }
-
-        ctx.restore();
-        animationFrameId.current = requestAnimationFrame(loop);
-        return;
+    vinesRef.current.forEach(v => {
+      if (checkHit(v.x, v.y, v.radius)) {
+        v.health -= 10;
+        spawnParticles(v.x, v.y, COLORS.laser, 3);
       }
+    });
 
-      // ----------------------
-      // PLAYING LOGIC
-      // ----------------------
-      if (gameState !== GameState.PLAYING) return;
+    bossesRef.current.forEach(b => {
+      b.segments.forEach(seg => {
+        if (checkHit(seg.x, seg.y, seg.radius)) {
+          if (b.type === 'BOSS_A' && seg.type === 'TAIL') {
+            b.health -= 2;
+            spawnParticles(seg.x, seg.y, COLORS.laser, 5);
+          } else if (b.type === 'SNAIL') {
+            b.health -= 1;
+            spawnParticles(seg.x, seg.y, COLORS.laser, 2);
+          } else if (b.type === 'LONG_VINE' && seg.type === 'WEAK') {
+            seg.destroyed = true;
+            b.health--;
+          }
+        }
+      });
+    });
+  };
 
+  const spawnBossA = (w: number, h: number) => {
+    const segments: BossSegment[] = [
+      { x: 0, y: 0, radius: 40, type: 'HEAD', destroyed: false },
+      { x: 0, y: 0, radius: 30, type: 'BODY', destroyed: false },
+      { x: 0, y: 0, radius: 25, type: 'TAIL', destroyed: false },
+    ];
+    bossesRef.current.push({
+      id: 'boss_a', type: 'BOSS_A', x: w / 2, y: -100, radius: 45,
+      health: BOSS_A_HP, maxHealth: BOSS_A_HP, segments, angle: Math.PI / 2, speed: 2
+    });
+  };
+
+  const spawnSnail = (w: number, h: number) => {
+    bossesRef.current.push({
+      id: 'snail', type: 'SNAIL', x: -100, y: h * 0.7, radius: 60,
+      health: SNAIL_HP, maxHealth: SNAIL_HP, segments: [], angle: 0, speed: 0.5
+    });
+  };
+
+  const loop = () => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    const { width, height } = canvas;
+
+    ctx.fillStyle = '#1c1917';
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = '#292524';
+    ctx.fillRect(0, height * 0.4, width, height * 0.6);
+
+    if (gameState === GameState.PLAYING) {
       frameCountRef.current++;
-      const player = playerRef.current;
+      const p = playerRef.current;
 
-      // 1. Movement
-      let moveX = 0, moveY = 0;
-      if (keysPressed.current['w'] || keysPressed.current['ArrowUp'] || keysPressed.current['W']) moveY -= 1;
-      if (keysPressed.current['s'] || keysPressed.current['ArrowDown'] || keysPressed.current['S']) moveY += 1;
-      if (keysPressed.current['a'] || keysPressed.current['ArrowLeft'] || keysPressed.current['A']) moveX -= 1;
-      if (keysPressed.current['d'] || keysPressed.current['ArrowRight'] || keysPressed.current['D']) moveX += 1;
-
-      if (moveX !== 0 || moveY !== 0) {
-        const len = Math.hypot(moveX, moveY);
-        moveX = (moveX / len) * PLAYER_SPEED;
-        moveY = (moveY / len) * PLAYER_SPEED;
-        player.x = Math.max(player.radius, Math.min(width - player.radius, player.x + moveX));
-        player.y = Math.max(player.radius, Math.min(height - player.radius, player.y + moveY));
+      // Powerup: Gậy dài
+      if (frameCountRef.current % 1200 === 0) {
+        p.longStickTimer = 180; // 3 giây
+      }
+      if (p.longStickTimer > 0) {
+        p.longStickTimer--;
+        p.weaponLength = p.baseWeaponLength * 3;
+      } else {
+        p.weaponLength = p.baseWeaponLength;
       }
 
-      // 2. Boss Spawning Logic
-      if (!bossRef.current) {
-        // Boss A Check: Exactly at 21 kills.
-        if (score === 21) {
-          spawnBossA(width, height);
-        } 
-        // Long Boss Check: Every 10 kills, but NOT if Boss A is supposed to spawn (20->21).
-        // The prompt says "If number of vines destroyed is divisible by 10".
-        // Wait, if score is 20, we spawn Long Boss. Killing it makes score 21? Or is boss separate?
-        // Let's assume killing boss allows score to progress. 
-        else if (score > 0 && score % 10 === 0 && score !== 20) { // Conflict at 20? 
-           // Prompt says: "When character hits 21 vines then Boss A".
-           // Prompt says: "Divisible by 10 -> Boss".
-           // At 20, we spawn Long Boss. Killing it -> Score 21 -> Boss A spawns.
-           // So yes, at 20 we spawn Long Boss.
-           spawnLongBoss(width, height);
-        }
+      // Input
+      let mx = 0, my = 0;
+      if (keysPressed.current['w']) my -= 1;
+      if (keysPressed.current['s']) my += 1;
+      if (keysPressed.current['a']) mx -= 1;
+      if (keysPressed.current['d']) mx += 1;
+      if ((mx !== 0 || my !== 0) && !p.isTeleporting) {
+        const mag = Math.hypot(mx, my);
+        p.x = Math.max(p.radius, Math.min(width - p.radius, p.x + (mx / mag) * PLAYER_SPEED));
+        p.y = Math.max(height * 0.4, Math.min(height - p.radius, p.y + (my / mag) * PLAYER_SPEED));
       }
 
-      // 3. Spawn Vines (Only if no boss active)
-      if (!bossRef.current && frameCountRef.current % Math.max(20, 100 - (level * 5)) === 0) {
-         // Logic for normal vine spawn
-         const side = Math.floor(Math.random() * 4);
-         let sx = 0, sy = 0;
-         if (side === 0) { sx = Math.random() * width; sy = -50; }
-         else if (side === 1) { sx = width + 50; sy = Math.random() * height; }
-         else if (side === 2) { sx = Math.random() * width; sy = height + 50; }
-         else { sx = -50; sy = Math.random() * height; }
+      const dx = mousePos.current.x - p.x;
+      const dy = mousePos.current.y - p.y;
+      p.angle = Math.atan2(dy, dx);
 
-         vinesRef.current.push({
-           id: Math.random().toString(),
-           x: sx,
-           y: sy,
-           radius: 15,
-           speed: VINE_BASE_SPEED + (level * 0.2),
-           angle: 0,
-           active: true,
-           wiggleOffset: Math.random() * 100,
-           color: Math.random() > 0.9 ? COLORS.vineDark : COLORS.vine
-         });
-      }
+      if (p.attackCooldown > 0) p.attackCooldown--;
+      if (p.attackCooldown < ATTACK_COOLDOWN) p.isAttacking = false;
+      if (p.laserCooldown > 0) p.laserCooldown--;
+      if (p.laserCooldown < LASER_COOLDOWN - LASER_DURATION) p.isFiringLaser = false;
 
-      // Attack Cooldown
-      if (player.attackCooldown > 0) player.attackCooldown--;
-      if (player.attackCooldown < ATTACK_COOLDOWN) player.isAttacking = false;
-
-      // --- COLLISIONS & UPDATES ---
-
-      const checkHit = (tx: number, ty: number, tr: number) => {
-         if (!player.isAttacking) return false;
-         
-         // Check Front Swing
-         const dist = Math.hypot(tx - player.x, ty - player.y);
-         if (dist <= player.weaponLength + tr && dist > player.radius) {
-            const angleToTarget = Math.atan2(ty - player.y, tx - player.x);
-            let angleDiff = angleToTarget - player.angle;
-            while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-            while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-            if (Math.abs(angleDiff) < 1.0) return true;
-         }
-
-         // Check Back Swing (If Double Staff)
-         if (player.weaponLevel === 2) {
-            // Angle is player.angle + PI
-            const backAngle = player.angle + Math.PI;
-            const angleToTarget = Math.atan2(ty - player.y, tx - player.x);
-            let angleDiff = angleToTarget - backAngle;
-            while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-            while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-            if (Math.abs(angleDiff) < 1.0 && dist <= player.weaponLength + tr) return true;
-         }
-         return false;
-      };
-
-      // BOSS LOGIC
-      if (bossRef.current) {
-        const boss = bossRef.current;
-
-        if (boss.type === 'LONG_VINE') {
-          // Move leader segment towards player
-          const dx = player.x - boss.x;
-          const dy = player.y - boss.y;
-          boss.angle = Math.atan2(dy, dx);
-          boss.x += Math.cos(boss.angle) * boss.speed;
-          boss.y += Math.sin(boss.angle) * boss.speed;
-
-          // Drag segments
-          let prevX = boss.x;
-          let prevY = boss.y;
-          
-          boss.segments.forEach((seg, idx) => {
-             const dist = Math.hypot(prevX - seg.x, prevY - seg.y);
-             const angle = Math.atan2(prevY - seg.y, prevX - seg.x);
-             const spacing = 15;
-             
-             seg.x = prevX - Math.cos(angle) * spacing;
-             seg.y = prevY - Math.sin(angle) * spacing;
-             
-             prevX = seg.x;
-             prevY = seg.y;
-
-             // Collision Player
-             if (Math.hypot(player.x - seg.x, player.y - seg.y) < player.radius + seg.radius) {
-               triggerGameOver();
-               return;
-             }
-
-             // Collision Attack
-             if (!seg.destroyed && seg.isWeakPoint && checkHit(seg.x, seg.y, seg.radius)) {
-                seg.destroyed = true;
-                boss.health--;
-                spawnParticles(seg.x, seg.y, COLORS.bossLong, 10);
-                
-                if (boss.health <= 0) {
-                   // Boss Dead
-                   bossRef.current = null;
-                   player.weaponLevel = 2; // Upgrade Weapon
-                   spawnParticles(boss.x, boss.y, '#FFD700', 30); // Gold particles
-                   setScore(s => s + 1); // Allow progress
-                }
-             }
-          });
-          // Head Collision
-          if (Math.hypot(player.x - boss.x, player.y - boss.y) < player.radius + boss.radius) {
-             triggerGameOver();
-             return;
-          }
-        } 
-        else if (boss.type === 'BOSS_A') {
-           // Boss A Logic
-           // Move towards player slowly
-           const dx = player.x - boss.x;
-           const dy = player.y - boss.y;
-           boss.angle = Math.atan2(dy, dx);
-           boss.x += Math.cos(boss.angle) * boss.speed;
-           boss.y += Math.sin(boss.angle) * boss.speed;
-
-           // Define Head and Tail positions based on angle
-           const length = 80;
-           const hx = boss.x + Math.cos(boss.angle) * (length/2);
-           const hy = boss.y + Math.sin(boss.angle) * (length/2);
-           const tx = boss.x - Math.cos(boss.angle) * (length/2);
-           const ty = boss.y - Math.sin(boss.angle) * (length/2);
-
-           boss.headPosition = {x: hx, y: hy};
-           boss.tailPosition = {x: tx, y: ty};
-
-           // Collision Player
-           if (Math.hypot(player.x - boss.x, player.y - boss.y) < player.radius + length/2) {
-              triggerGameOver();
-              return;
-           }
-
-           // Attack Hit Checks
-           if (checkHit(hx, hy, 25)) {
-              // Hit Head -> Trap -> Spawn Spiders
-              // Only spawn if cooldown allows or just once? Prompt says "if hit on head... spiders jump out".
-              // Let's just spawn spiders every time head is hit (punishment).
-              spawnSpiders();
-              spawnParticles(hx, hy, COLORS.spider, 5);
-              // Knockback boss slightly
-              boss.x -= Math.cos(boss.angle) * 20;
-              boss.y -= Math.sin(boss.angle) * 20;
-           }
-
-           if (checkHit(tx, ty, 25)) {
-              // Hit Tail -> Damage
-              boss.health--;
-              spawnParticles(tx, ty, COLORS.bossA, 8);
-               // Knockback boss slightly
-              boss.x -= Math.cos(boss.angle) * 10;
-              boss.y -= Math.sin(boss.angle) * 10;
-              
-              if (boss.health <= 0) {
-                 bossRef.current = null;
-                 spawnParticles(boss.x, boss.y, '#FFD700', 50);
-                 setScore(s => s + 5); // Bonus points
-              }
-           }
-        }
-      }
-
-      // Spiders Logic
-      for (let i = spidersRef.current.length - 1; i >= 0; i--) {
-        const spider = spidersRef.current[i];
-        const dx = player.x - spider.x;
-        const dy = player.y - spider.y;
-        const angle = Math.atan2(dy, dx);
+      // Spawning
+      const vineHP = Math.floor(score / 20) + 1;
+      if (frameCountRef.current % 60 === 0) {
+        const side = Math.floor(Math.random() * 4);
+        let vx = 0, vy = 0;
+        if (side === 0) { vx = Math.random() * width; vy = -30; }
+        else if (side === 1) { vx = width + 30; vy = Math.random() * height; }
+        else if (side === 2) { vx = Math.random() * width; vy = height + 30; }
+        else { vx = -30; vy = Math.random() * height; }
         
-        spider.x += Math.cos(angle) * spider.speed;
-        spider.y += Math.sin(angle) * spider.speed;
-
-        if (Math.hypot(dx, dy) < player.radius + spider.radius) {
-           triggerGameOver();
-           return;
-        }
-
-        if (checkHit(spider.x, spider.y, spider.radius)) {
-           spider.health -= 5; // Takes 2 hits (10HP)
-           spawnParticles(spider.x, spider.y, COLORS.spider, 3);
-           // Knockback
-           spider.x -= Math.cos(angle) * 20;
-           spider.y -= Math.sin(angle) * 20;
-
-           if (spider.health <= 0) {
-             spidersRef.current.splice(i, 1);
-             spawnParticles(spider.x, spider.y, COLORS.rubble, 5);
-           }
-        }
+        vinesRef.current.push({
+          id: Math.random().toString(), x: vx, y: vy, radius: 15,
+          health: vineHP, maxHealth: vineHP, speed: VINE_BASE_SPEED + (Math.random() > 0.8 ? 2 : 0),
+          angle: 0, active: true, wiggleOffset: Math.random() * 100, color: COLORS.vine
+        });
       }
 
-      // Normal Vines Logic
-      for (let i = vinesRef.current.length - 1; i >= 0; i--) {
-        const vine = vinesRef.current[i];
-        const dx = player.x - vine.x;
-        const dy = player.y - vine.y;
-        vine.angle = Math.atan2(dy, dx);
-        vine.x += Math.cos(vine.angle) * vine.speed;
-        vine.y += Math.sin(vine.angle) * vine.speed;
+      if (score > 0 && score % 40 === 0 && !bossesRef.current.some(b => b.type === 'BOSS_A')) spawnBossA(width, height);
+      if (score > 0 && score % 70 === 0 && !bossesRef.current.some(b => b.type === 'SNAIL')) spawnSnail(width, height);
 
-        if (Math.hypot(dx, dy) < player.radius + vine.radius) {
-          triggerGameOver();
-          return;
+      // Updates
+      vinesRef.current = vinesRef.current.filter(v => {
+        const vdx = p.x - v.x, vdy = p.y - v.y;
+        v.angle = Math.atan2(vdy, vdx);
+        v.x += Math.cos(v.angle) * v.speed;
+        v.y += Math.sin(v.angle) * v.speed;
+
+        if (Math.hypot(vdx, vdy) < p.radius + v.radius) {
+          p.health--;
+          spawnParticles(p.x, p.y, 'red', 10);
+          return false;
         }
 
-        if (checkHit(vine.x, vine.y, vine.radius)) {
-           spawnParticles(vine.x, vine.y, COLORS.vine, 5);
-           vinesRef.current.splice(i, 1);
-           const newScore = score + 1;
-           setScore(newScore);
-           if (newScore % 10 === 0) setLevel(l => l + 1);
+        if (p.isAttacking) {
+          const dist = Math.hypot(vdx, vdy);
+          if (dist < p.weaponLength + v.radius) {
+            const angleTo = Math.atan2(v.y - p.y, v.x - p.x);
+            let diff = angleTo - p.angle;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            if (Math.abs(diff) < 0.8) {
+              v.health--;
+              spawnParticles(v.x, v.y, v.color, 3);
+              if (v.health <= 0) { setScore(s => s + 1); return false; }
+            }
+          }
         }
-      }
-
-      // Particles Logic
-      for (let i = particlesRef.current.length - 1; i >= 0; i--) {
-        const p = particlesRef.current[i];
-        p.x += p.vx;
-        p.y += p.vy;
-        p.life--;
-        if (p.life <= 0) particlesRef.current.splice(i, 1);
-      }
-
-      // --- DRAWING ---
-      ctx.fillStyle = '#1a1a1a';
-      ctx.fillRect(0, 0, width, height);
-
-      // Background
-      ctx.save();
-      ctx.fillStyle = COLORS.rubble;
-      PILLARS.forEach((pillar) => {
-        ctx.beginPath();
-        ctx.rect(pillar.x - 30, pillar.y - 30, 60, 60);
-        ctx.fill();
-        ctx.font = '20px Cinzel';
-        ctx.fillStyle = '#737373';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(pillar.label, pillar.x, pillar.y);
-      });
-      ctx.restore();
-
-      // Particles
-      particlesRef.current.forEach(p => {
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
-        ctx.fillStyle = p.color;
-        ctx.globalAlpha = p.life / 30;
-        ctx.fill();
-        ctx.globalAlpha = 1;
+        return v.health > 0;
       });
 
-      // Spiders
-      spidersRef.current.forEach(spider => {
-         ctx.beginPath();
-         ctx.arc(spider.x, spider.y, spider.radius, 0, Math.PI * 2);
-         ctx.fillStyle = COLORS.spider;
-         ctx.fill();
-         // Legs
-         for(let k=0; k<8; k++) {
-           const legAngle = k * (Math.PI/4);
-           ctx.beginPath();
-           ctx.moveTo(spider.x, spider.y);
-           ctx.lineTo(spider.x + Math.cos(legAngle)*20, spider.y + Math.sin(legAngle)*20);
-           ctx.strokeStyle = COLORS.spider;
-           ctx.lineWidth = 2;
-           ctx.stroke();
-         }
-      });
+      bossesRef.current = bossesRef.current.filter(b => {
+        if (b.type === 'BOSS_A') {
+          const bdx = p.x - b.x, bdy = p.y - b.y;
+          b.angle = Math.atan2(bdy, bdx);
+          b.x += Math.cos(b.angle) * b.speed;
+          b.y += Math.sin(b.angle) * b.speed;
 
-      // Boss
-      if (bossRef.current) {
-         const boss = bossRef.current;
-         if (boss.type === 'LONG_VINE') {
-            boss.segments.forEach(seg => {
-               if(seg.destroyed) return;
-               ctx.beginPath();
-               ctx.arc(seg.x, seg.y, seg.radius, 0, Math.PI*2);
-               ctx.fillStyle = seg.isWeakPoint ? '#ef4444' : COLORS.bossLong;
-               ctx.fill();
+          // Cập nhật vị trí các đoạn
+          b.segments[0].x = b.x; b.segments[0].y = b.y; // Head
+          b.segments[1].x = b.x - Math.cos(b.angle) * 40; b.segments[1].y = b.y - Math.sin(b.angle) * 40; // Body
+          b.segments[2].x = b.x - Math.cos(b.angle) * 80; b.segments[2].y = b.y - Math.sin(b.angle) * 80; // Tail
+
+          if (p.isAttacking) {
+            b.segments.forEach(seg => {
+              const dist = Math.hypot(seg.x - p.x, seg.y - p.y);
+              if (dist < p.weaponLength + seg.radius) {
+                if (seg.type === 'HEAD') spawnSpiders();
+                if (seg.type === 'TAIL') {
+                   b.health -= 0.1; // Sát thương gậy thấp hơn tia laser
+                   spawnParticles(seg.x, seg.y, COLORS.bossA, 2);
+                }
+              }
             });
-            // Head
-            ctx.beginPath();
-            ctx.arc(boss.x, boss.y, boss.radius + 5, 0, Math.PI*2);
-            ctx.fillStyle = COLORS.bossLong;
-            ctx.fill();
-            // Eyes
-            ctx.fillStyle = '#fff';
-            ctx.beginPath(); ctx.arc(boss.x-5, boss.y-5, 5, 0, Math.PI*2); ctx.fill();
-            ctx.beginPath(); ctx.arc(boss.x+5, boss.y-5, 5, 0, Math.PI*2); ctx.fill();
-         } else if (boss.type === 'BOSS_A') {
-             ctx.save();
-             ctx.translate(boss.x, boss.y);
-             ctx.rotate(boss.angle);
-             
-             // Body
-             ctx.fillStyle = COLORS.bossA;
-             ctx.fillRect(-40, -20, 80, 40);
-             
-             // Head (Front)
-             ctx.fillStyle = '#ef4444'; // Red for Trap
-             ctx.beginPath(); ctx.arc(40, 0, 25, 0, Math.PI*2); ctx.fill();
-             
-             // Tail (Back)
-             ctx.fillStyle = '#22c55e'; // Green for Weakness
-             ctx.beginPath(); ctx.arc(-40, 0, 25, 0, Math.PI*2); ctx.fill();
-             
-             ctx.restore();
-         }
-      }
+          }
+        } else if (b.type === 'SNAIL') {
+          b.x += b.speed;
+          if (Math.hypot(p.x - b.x, p.y - b.y) < p.radius + b.radius) triggerGameOver();
+          if (p.isAttacking && Math.hypot(p.x - b.x, p.y - b.y) < p.weaponLength + b.radius) {
+            b.health -= 0.1;
+            spawnParticles(b.x, b.y, COLORS.snail, 1);
+          }
+        }
+        return b.health > 0;
+      });
 
-      // Vines
-      vinesRef.current.forEach(vine => {
-        ctx.save();
-        ctx.translate(vine.x, vine.y);
-        ctx.rotate(vine.angle);
-        ctx.beginPath();
-        ctx.arc(0, 0, vine.radius, 0, Math.PI * 2);
-        ctx.fillStyle = vine.color;
-        ctx.fill();
-        ctx.beginPath();
-        ctx.moveTo(0, 0);
-        const wiggle = Math.sin((frameCountRef.current + vine.wiggleOffset) * 0.2) * 10;
-        ctx.quadraticCurveTo(-20, wiggle, -40, 0);
-        ctx.strokeStyle = vine.color;
-        ctx.lineWidth = 8;
-        ctx.stroke();
-        ctx.fillStyle = '#ef4444';
-        ctx.beginPath(); ctx.arc(5, -5, 3, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(5, 5, 3, 0, Math.PI * 2); ctx.fill();
-        ctx.restore();
+      spidersRef.current = spidersRef.current.filter(s => {
+        const sdx = p.x - s.x, sdy = p.y - s.y;
+        const angle = Math.atan2(sdy, sdx);
+        s.x += Math.cos(angle) * s.speed;
+        s.y += Math.sin(angle) * s.speed;
+        if (Math.hypot(sdx, sdy) < p.radius + s.radius) { p.health--; return false; }
+        if (p.isAttacking && Math.hypot(sdx, sdy) < p.weaponLength + s.radius) {
+          s.health--;
+          if (s.health <= 0) return false;
+        }
+        return true;
+      });
+
+      if (p.health <= 0) triggerGameOver();
+
+      // Draw
+      vinesRef.current.forEach(v => {
+        ctx.fillStyle = v.color;
+        ctx.beginPath(); ctx.arc(v.x, v.y, v.radius, 0, Math.PI * 2); ctx.fill();
+        // HP bar
+        ctx.fillStyle = 'red'; ctx.fillRect(v.x - 10, v.y - 25, 20 * (v.health / v.maxHealth), 3);
+      });
+
+      bossesRef.current.forEach(b => {
+        if (b.type === 'BOSS_A') {
+          b.segments.forEach(seg => {
+            ctx.fillStyle = seg.type === 'TAIL' ? '#a855f7' : COLORS.bossA;
+            ctx.beginPath(); ctx.arc(seg.x, seg.y, seg.radius, 0, Math.PI * 2); ctx.fill();
+          });
+        } else if (b.type === 'SNAIL') {
+          ctx.fillStyle = COLORS.snail;
+          ctx.beginPath(); ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = '#fde047'; ctx.beginPath(); ctx.arc(b.x + 40, b.y, 20, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.fillStyle = 'red'; ctx.fillRect(b.x - 40, b.y - b.radius - 20, 80 * (b.health / b.maxHealth), 5);
+      });
+
+      spidersRef.current.forEach(s => {
+        ctx.fillStyle = '#111';
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2;
+        for(let i=0; i<8; i++) {
+          ctx.beginPath(); ctx.moveTo(s.x, s.y);
+          ctx.lineTo(s.x + Math.cos(i * Math.PI/4) * 20, s.y + Math.sin(i * Math.PI/4) * 20); ctx.stroke();
+        }
       });
 
       // Player
       ctx.save();
-      ctx.translate(player.x, player.y);
-      ctx.rotate(player.angle);
-
-      // WEAPON
-      const drawStick = (rotation: number) => {
-         ctx.save();
-         ctx.rotate(rotation);
-         ctx.beginPath();
-         ctx.moveTo(0, 0);
-         ctx.lineTo(player.weaponLength, 0);
-         ctx.strokeStyle = COLORS.stick;
-         ctx.lineWidth = 8;
-         ctx.lineCap = 'round';
-         ctx.stroke();
-         ctx.restore();
-      };
-
-      if (player.isAttacking) {
-        const progress = 1 - (player.attackCooldown - ATTACK_COOLDOWN) / ATTACK_DURATION;
-        const swipeArc = Math.PI / 1.5;
-        const currentSwipe = -swipeArc/2 + (swipeArc * progress); 
-        
-        ctx.save();
-        ctx.rotate(currentSwipe);
-        drawStick(0);
-        if (player.weaponLevel === 2) drawStick(Math.PI); // Double staff
-        ctx.restore();
-
-        // Swipe Trails
-        ctx.beginPath();
-        ctx.arc(0, 0, player.weaponLength, currentSwipe - 0.2, currentSwipe + 0.2);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-        ctx.lineWidth = 20;
-        ctx.stroke();
-
-        if (player.weaponLevel === 2) {
-           ctx.beginPath();
-           ctx.arc(0, 0, player.weaponLength, currentSwipe + Math.PI - 0.2, currentSwipe + Math.PI + 0.2);
-           ctx.stroke();
-        }
-
-      } else {
-        // Idle
-        drawStick(Math.PI/4);
-        if (player.weaponLevel === 2) drawStick(Math.PI/4 + Math.PI);
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.angle);
+      if (p.isFiringLaser) {
+        ctx.strokeStyle = COLORS.laser; ctx.lineWidth = 20; ctx.shadowBlur = 15; ctx.shadowColor = COLORS.laser;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(1500, 0); ctx.stroke();
       }
-
-      // Hero Body
-      ctx.beginPath();
-      ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
-      ctx.fillStyle = COLORS.player;
-      ctx.fill();
+      ctx.strokeStyle = p.longStickTimer > 0 ? '#fbbf24' : COLORS.stick; ctx.lineWidth = 10;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(p.weaponLength, 0); ctx.stroke();
+      ctx.fillStyle = COLORS.player; ctx.beginPath(); ctx.arc(0, 0, p.radius, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
-
-      animationFrameId.current = requestAnimationFrame(loop);
-    };
+    }
 
     animationFrameId.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(animationFrameId.current);
-  }, [gameState, level, score, setLevel, setScore, triggerGameOver]);
+  };
 
-  return <canvas ref={canvasRef} className="block cursor-crosshair" />;
+  useEffect(() => {
+    animationFrameId.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(animationFrameId.current);
+  }, [gameState, score]);
+
+  const onMouseDown = () => {
+    if (playerRef.current.attackCooldown <= 0) {
+      playerRef.current.isAttacking = true;
+      playerRef.current.attackCooldown = ATTACK_DURATION + ATTACK_COOLDOWN;
+    }
+  };
+
+  return <canvas 
+    ref={canvasRef} 
+    onMouseDown={onMouseDown}
+    onMouseMove={(e) => mousePos.current = { x: e.clientX, y: e.clientY }}
+    className="block cursor-crosshair" 
+  />;
 };

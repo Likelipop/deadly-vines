@@ -35,10 +35,16 @@ export const generateStorySegment = async (level: number, type: 'start' | 'gameo
     });
 
     return response.text || "The vines writhe in the darkness...";
-  } catch (error) {
-    console.error("Gemini API Error:", error);
+  } catch (error: any) {
+    // Handle Quota Exceeded gracefully
+    if (error.message?.includes('429') || error.status === 429) {
+      console.warn("Gemini API Quota Exceeded - Using offline story mode.");
+    } else {
+      console.warn("Gemini API Error - Using fallback text.");
+    }
+    
     return type === 'start' 
-      ? "The ruins are silent. The vines approach." 
+      ? "The ruins are silent. The vines approach from the shadows." 
       : "You have been consumed by the green abyss.";
   }
 };
